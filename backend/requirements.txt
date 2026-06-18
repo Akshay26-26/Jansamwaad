@@ -1,0 +1,17 @@
+# Jansamvaad 2.0+ — AI Grievance Intelligence backend
+# Pins are lower-bounds so pip pulls prebuilt wheels for the local Python
+# (incl. Python 3.13). Lightweight stack — runs on constrained compute.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.7
+python-dotenv>=1.0
+
+# Claude API (demo-quality LLM provider). Production swaps this for an
+# open-weight, self-hosted model behind the same LLMProvider interface.
+anthropic>=0.40
+
+# NOTE: Indian-language NLP (IndicBERT/MuRIL) and semantic embeddings
+# (sentence-transformers) are documented as the PRODUCTION engine in
+# ARCHITECTURE.md. The prototype deliberately uses a dependency-light,
+# pure-Python TF-IDF + cosine engine (similarity.py) so it runs offline on
+# a laptop / low-end government hardware with zero model downloads.
