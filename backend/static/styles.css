@@ -154,12 +154,45 @@ tr.selected { background: #eef5fb; }
 .stat.alert .n { color: var(--red); }
 
 /* Bar chart */
-.bars { display: flex; flex-direction: column; gap: 9px; }
-.bar-row { display: grid; grid-template-columns: 160px 1fr 36px; align-items: center; gap: 10px; font-size: 13px; }
+.bars { display: flex; flex-direction: column; gap: 7px; }
+.bar-row { display: grid; grid-template-columns: 168px 1fr 34px; align-items: center; gap: 10px; font-size: 13px; padding: 3px 6px; border-radius: 7px; transition: background .15s; }
 .bar-row .name { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bar-track { height: 18px; background: #eef2f7; border-radius: 6px; overflow: hidden; }
-.bar-fill { height: 100%; background: linear-gradient(90deg, var(--navy-2), var(--blue)); border-radius: 6px; }
-.bar-row .val { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+.bar-row.clickable { cursor: pointer; }
+.bar-row.clickable:hover { background: #f1f6fb; }
+.bar-row.clickable:hover .bar-fill { filter: brightness(1.08) saturate(1.1); }
+.bar-row.active { background: #eaf2fb; }
+.bar-row.active .name { font-weight: 700; color: var(--navy); }
+.bar-track { display: block; height: 20px; background: #eef2f7; border-radius: 6px; overflow: hidden; }
+/* display:block is required — the fill is a <span>, which would otherwise be
+   inline and ignore width/height. */
+.bar-fill { display: block; height: 100%; min-width: 3px; border-radius: 6px;
+  background: linear-gradient(90deg, var(--navy-2), var(--blue));
+  transition: width .55s cubic-bezier(.22,.61,.36,1), filter .15s; }
+.bar-fill.crit { background: linear-gradient(90deg, #b83227, #e05a48); }
+.bar-fill.high { background: linear-gradient(90deg, #c97a16, #e89a3c); }
+.bar-fill.med  { background: linear-gradient(90deg, #b8902a, #d9b94e); }
+.bar-fill.low  { background: linear-gradient(90deg, #1d7a45, #46b377); }
+.bar-row .val { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--navy); }
+
+/* Confidence fill — same inline-span fix */
+.conf .fill { display: block; transition: width .5s cubic-bezier(.22,.61,.36,1); }
+
+/* Clickable stat cards */
+.stat.clickable { cursor: pointer; transition: transform .12s, box-shadow .12s, border-color .12s; }
+.stat.clickable:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(16,30,54,.12); border-color: #c9d8ea; }
+.stat.active { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(37,99,168,.15); }
+
+/* Drill-down results panel */
+.drill { border: 1px solid #cfe0f1; border-radius: var(--radius); background: #fff; box-shadow: var(--shadow); margin-bottom: 20px; overflow: hidden; }
+.drill-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 18px; background: linear-gradient(120deg, #eef5fb, #f7fafd); border-bottom: 1px solid #e2ecf5; }
+.drill-head .t { font-weight: 700; color: var(--navy); font-size: 15px; }
+.drill-head .t .count { color: var(--muted); font-weight: 600; font-size: 13px; margin-left: 8px; }
+.drill-close { background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: 5px 11px; cursor: pointer; font-weight: 600; color: var(--muted); font-size: 13px; }
+.drill-close:hover { background: #f3f6fa; color: var(--ink); }
+.drill-body { max-height: 360px; overflow: auto; }
+.drill-body table { font-size: 13px; }
+.drill-body th { position: sticky; top: 0; background: #fff; z-index: 1; }
+.hint { font-size: 11.5px; color: var(--muted); font-weight: 500; margin-left: 8px; }
 
 /* Clusters */
 .cluster { border: 1px solid var(--line); border-radius: 9px; padding: 13px 15px; margin-bottom: 12px; }

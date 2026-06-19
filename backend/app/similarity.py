@@ -32,7 +32,11 @@ def tokenize(text: str) -> list[str]:
 
 
 class TfidfIndex:
-    """Tiny incremental TF-IDF index with cosine similarity."""
+    """Tiny incremental TF-IDF index with cosine similarity (offline fallback)."""
+
+    # Cosine thresholds tuned for sparse TF-IDF vectors (lower than embeddings).
+    cluster_threshold = 0.18
+    dup_threshold = 0.55
 
     def __init__(self) -> None:
         self._docs: dict[str, Counter] = {}
@@ -47,6 +51,10 @@ class TfidfIndex:
         for term in tf:
             self._df[term] += 1
         self._dirty = True
+
+    def add_many(self, items: list[tuple[str, str]]) -> None:
+        for doc_id, text in items:
+            self.add(doc_id, text)
 
     def _idf(self, term: str) -> float:
         n = len(self._docs)
@@ -91,16 +99,17 @@ class TfidfIndex:
         return round(dot / (self._norm[a] * self._norm[b]), 4)
 
 
-def cluster(records: list[dict], threshold: float = 0.18) -> list[dict]:
+def cluster(records: list[dict], index, threshold: float | None = None) -> list[dict]:
     """Greedy single-link clustering for supervisory 'systemic issue' detection.
 
-    `records` are dicts with at least: complaint_id, summary, category,
+    Uses the live store index (TF-IDF offline, or Gemini semantic embeddings
+    when available) — so it groups complaints by *meaning*, not just shared
+    words. `records` are dicts with at least: complaint_id, summary, category,
     department, district, status, text. Clusters surface recurring issues
     (same problem, same area) so supervisors can spot bottlenecks early.
     """
-    index = TfidfIndex()
-    for r in records:
-        index.add(r["complaint_id"], f"{r.get('category','')} {r.get('district','')} {r.get('text','')}")
+    if threshold is None:
+        threshold = getattr(index, "cluster_threshold", 0.18)
 
     unassigned = {r["complaint_id"]: r for r in records}
     clusters: list[list[dict]] = []
@@ -133,5 +142,18 @@ def cluster(records: list[dict], threshold: float = 0.18) -> list[dict]:
             "complaint_ids": [g["complaint_id"] for g in group],
             "samples": [g.get("summary", g.get("text", ""))[:140] for g in group[:4]],
             "is_systemic": len(group) >= 3,
+            # Full per-complaint rows so the UI can expand a cluster on click.
+            "complaints": [
+                {
+                    "complaint_id": g["complaint_id"],
+                    "summary": (g.get("summary") or g.get("text", ""))[:160],
+                    "district": g.get("district", ""),
+                    "department": g.get("department", ""),
+                    "category": g.get("category", ""),
+                    "urgency": g.get("urgency", "Medium"),
+                    "status": g.get("status", "Open"),
+                }
+                for g in group
+            ],
         })
     return out

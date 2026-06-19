@@ -10,6 +10,7 @@ asks for, and it is fully auditable.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from .preprocess import detect_script, normalize
@@ -62,7 +63,22 @@ def triage(
     normalized, notes = normalize(text)
     lang_hint = detect_script(text)
 
-    analysis = provider.analyze(normalized, lang_hint, notes)
+    # Run the LLM classification and the complaint's embedding CONCURRENTLY.
+    # The embedding (used for similarity + stored on save) overlaps with the
+    # slower LLM call instead of running after it, cutting end-to-end latency.
+    def _prewarm_embedding():
+        embed_one = getattr(index, "_embed_one", None)
+        if embed_one:
+            try:
+                embed_one(text)  # caches the vector for similar() + save reuse
+            except Exception:
+                pass
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        analysis_future = pool.submit(provider.analyze, normalized, lang_hint, notes)
+        pool.submit(_prewarm_embedding)
+        analysis = analysis_future.result()
+
     analysis = _apply_safety_floor(normalized, analysis)
 
     # Prepend the preprocessing notes so the officer sees what was expanded.
@@ -83,7 +99,10 @@ def triage(
     # RAG: retrieve similar past complaints for officer context + duplicate flag.
     similar: list[SimilarCase] = []
     is_dup = False
-    for doc_id, score in index.similar(f"{analysis.category} {normalized}", top_k=3, exclude=complaint_id):
+    dup_threshold = getattr(index, "dup_threshold", 0.55)
+    # Query by the raw complaint text — already embedded above (cache hit), and
+    # identical to what the store will embed on save (another cache hit).
+    for doc_id, score in index.similar(text, top_k=3, exclude=complaint_id):
         rec = records_by_id.get(doc_id)
         if not rec:
             continue
@@ -95,7 +114,7 @@ def triage(
             similarity=score,
             status=rec.get("status", "Open"),
         ))
-        if score >= 0.55 and rec.get("district") == district:
+        if score >= dup_threshold and rec.get("district") == district:
             is_dup = True
 
     return TriageResult(

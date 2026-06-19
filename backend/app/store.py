@@ -12,7 +12,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 
-from . import similarity
+from . import embeddings, gemini, similarity
 from .schemas import AuditEntry, TriageResult
 from .seed_data import seed_records
 from .taxonomy import ALL_DEPARTMENTS, DISTRICTS
@@ -23,14 +23,24 @@ class Store:
         self.records: dict[str, dict] = {}
         self.results: dict[str, TriageResult] = {}   # full AI results for live ones
         self.audit: list[AuditEntry] = []
-        self.index = similarity.TfidfIndex()
+        # Semantic Gemini-embedding index when available, else offline TF-IDF.
+        self.index = embeddings.make_index()
         self._counter = 2000
         self._load_seed()
 
+    def _index_text(self, rec: dict) -> str:
+        # Embed the raw complaint text only. Keeping this identical to the text
+        # triage embeds for its similarity query means the per-complaint save is
+        # a cache hit (no extra embedding API call), and metadata (district /
+        # department) is matched separately in clustering.
+        return rec.get("text", "")
+
     def _load_seed(self) -> None:
-        for rec in seed_records():
+        records = seed_records()
+        for rec in records:
             self.records[rec["complaint_id"]] = rec
-            self.index.add(rec["complaint_id"], f"{rec['category']} {rec['district']} {rec['text']}")
+        # Batch-embed all seed records in a single API call.
+        self.index.add_many([(r["complaint_id"], self._index_text(r)) for r in records])
 
     # -- ids ---------------------------------------------------------------
     def next_id(self) -> str:
@@ -104,14 +114,115 @@ class Store:
         }
 
     def clusters(self) -> list[dict]:
-        return similarity.cluster(list(self.records.values()))
+        return similarity.cluster(list(self.records.values()), self.index)
 
     # -- Natural-language query (supervisory) ------------------------------
     def nlq(self, question: str) -> dict:
-        """Lightweight, transparent NLQ: parse intent + filters from the
-        question and answer over the structured store. No black box — the
-        applied filters are returned so the supervisor sees exactly what ran.
+        """Transparent NLQ. Gemini parses the question into STRUCTURED filters
+        (robust to phrasing/language); the filters are then applied
+        deterministically over the store and returned to the supervisor — so
+        the query is powered by Gemini but stays fully auditable (no black box).
+        Falls back to keyword parsing if Gemini is unavailable.
         """
+        if gemini.is_available():
+            try:
+                recs, filters = self._gemini_filters(question)
+                return self._format_nlq(question, recs, filters)
+            except Exception:
+                pass
+        return self._keyword_nlq(question)
+
+    def _gemini_filters(self, question: str) -> tuple[list[dict], list[str]]:
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "district": {"type": "STRING"},
+                "topic": {"type": "STRING"},
+                "urgency": {"type": "STRING", "enum": ["Critical", "High", "Medium", "Low", ""]},
+                "status": {"type": "STRING", "enum": ["Open", "Resolved", ""]},
+                "safety_only": {"type": "BOOLEAN"},
+                "min_age_days": {"type": "INTEGER"},
+            },
+            "required": ["district", "topic", "urgency", "status", "safety_only", "min_age_days"],
+        }
+        system = (
+            "You extract structured query filters from a Haryana grievance "
+            "supervisor's natural-language question. `district` must be a Haryana "
+            "district name or empty. `topic` is a single department keyword "
+            "(e.g. Water, Power, Roads, Revenue, Police, Health, Education, "
+            "Municipal, Food, Pension) or empty. Use empty string / 0 / false when "
+            "a field is not mentioned. `min_age_days` for 'long pending'/'delayed' "
+            "questions (e.g. 7)."
+        )
+        f = gemini.generate_json(system, question, schema)
+        recs = list(self.records.values())
+        filters: list[str] = []
+
+        dist = (f.get("district") or "").strip()
+        match_d = next((d for d in DISTRICTS if d.lower() == dist.lower()), None)
+        if match_d:
+            recs = [r for r in recs if r.get("district") == match_d]
+            filters.append(f"district = {match_d}")
+
+        topic = (f.get("topic") or "").strip().lower()
+        if topic:
+            recs = [r for r in recs if topic in r.get("department", "").lower()
+                    or topic in r.get("category", "").lower()]
+            filters.append(f"topic ~ {topic}")
+
+        urg = (f.get("urgency") or "").strip()
+        if urg:
+            recs = [r for r in recs if r.get("urgency") == urg]
+            filters.append(f"urgency = {urg}")
+
+        if f.get("safety_only"):
+            recs = [r for r in recs if r.get("urgency") == "Critical" or r.get("is_safety_critical")]
+            filters.append("safety-critical only")
+
+        status = (f.get("status") or "").strip()
+        if status == "Open":
+            recs = [r for r in recs if r.get("status") in ("Open", "In Progress")]
+            filters.append("status = Open/In Progress")
+        elif status == "Resolved":
+            recs = [r for r in recs if r.get("status") in ("Resolved", "Routed")]
+            filters.append("status = Resolved")
+
+        min_age = int(f.get("min_age_days") or 0)
+        if min_age > 0:
+            recs = [r for r in recs if self._age_days(r) >= min_age and r.get("status") in ("Open", "In Progress")]
+            filters.append(f"pending ≥ {min_age} days")
+
+        return recs, filters
+
+    @staticmethod
+    def _age_days(r: dict) -> int:
+        try:
+            return (datetime.now(timezone.utc) - datetime.fromisoformat(r["created_at"])).days
+        except Exception:
+            return 0
+
+    def _format_nlq(self, question: str, recs: list[dict], filters: list[str]) -> dict:
+        rows = sorted(recs, key=lambda r: r.get("created_at", ""), reverse=True)[:25]
+        return {
+            "question": question,
+            "applied_filters": filters or ["no filters matched — showing recent complaints"],
+            "count": len(recs),
+            "results": [
+                {
+                    "complaint_id": r["complaint_id"],
+                    "summary": r.get("summary", r.get("text", ""))[:120],
+                    "district": r.get("district"),
+                    "department": r.get("department"),
+                    "category": r.get("category"),
+                    "urgency": r.get("urgency"),
+                    "status": r.get("status"),
+                }
+                for r in rows
+            ],
+        }
+
+    def _keyword_nlq(self, question: str) -> dict:
+        """Offline keyword fallback when Gemini is unavailable."""
         q = question.lower()
         recs = list(self.records.values())
         filters: list[str] = []
@@ -158,32 +269,10 @@ class Store:
 
         # "delay/old" → simple age intent (days since created)
         if "delay" in q or "old" in q or "long pending" in q:
-            def age_days(r):
-                try:
-                    return (datetime.now(timezone.utc) - datetime.fromisoformat(r["created_at"])).days
-                except Exception:
-                    return 0
-            recs = [r for r in recs if age_days(r) >= 7 and r.get("status") in ("Open", "In Progress")]
+            recs = [r for r in recs if self._age_days(r) >= 7 and r.get("status") in ("Open", "In Progress")]
             filters.append("pending ≥ 7 days")
 
-        rows = sorted(recs, key=lambda r: r.get("created_at", ""), reverse=True)[:50]
-        return {
-            "question": question,
-            "applied_filters": filters or ["no filters matched — showing recent complaints"],
-            "count": len(recs),
-            "results": [
-                {
-                    "complaint_id": r["complaint_id"],
-                    "summary": r.get("summary", r.get("text", ""))[:120],
-                    "district": r.get("district"),
-                    "department": r.get("department"),
-                    "category": r.get("category"),
-                    "urgency": r.get("urgency"),
-                    "status": r.get("status"),
-                }
-                for r in rows[:25]
-            ],
-        }
+        return self._format_nlq(question, recs, filters)
 
 
 store = Store()

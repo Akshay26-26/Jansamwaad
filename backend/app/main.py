@@ -16,7 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-load_dotenv()
+# Load backend/.env regardless of the process working directory.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from .llm import get_provider  # noqa: E402
 from .schemas import (  # noqa: E402
@@ -41,6 +42,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def no_cache(request, call_next):
+    """Prototype: never let the browser serve a stale dashboard from cache."""
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
 
 _provider = get_provider()
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"

@@ -137,6 +137,8 @@ function OfficerView({ taxonomy }) {
   const [audit, setAudit] = useState([]);
   const [reason, setReason] = useState("");
   const [override, setOverride] = useState({});
+  const [flash, setFlash] = useState(null);
+  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     const q = await api("/api/queue"); setItems(q.items);
@@ -145,19 +147,29 @@ function OfficerView({ taxonomy }) {
   useEffect(() => { load(); }, [load]);
 
   const openItem = async (cid) => {
-    setSel(cid); setReason(""); setOverride({});
+    setSel(cid); setReason(""); setOverride({}); setFlash(null);
     const d = await api("/api/complaint/" + cid); setDetail(d);
   };
 
   const decide = async (action) => {
-    await post("/api/decision", {
-      complaint_id: sel, action,
-      final_category: override.category || null,
-      final_department: override.department || null,
-      final_urgency: override.urgency || null,
-      reason: reason,
-    });
-    await load(); await openItem(sel);
+    if (!sel || busy) return;
+    setBusy(true);
+    try {
+      const res = await post("/api/decision", {
+        complaint_id: sel, action,
+        final_category: override.category || null,
+        final_department: override.department || null,
+        final_urgency: override.urgency || null,
+        reason: reason,
+      });
+      await load(); await openItem(sel);
+      const a = res.audit;
+      const verb = action === "override" ? "Override" : action === "escalate" ? "Escalation" : "Acceptance";
+      setFlash({ ok: true, text: `✓ ${verb} recorded for ${a.complaint_id} → routed to ${(a.final_department || "").split(" (")[0]} as ${a.final_category} (${a.final_urgency}). Written to the audit log below.` });
+    } catch (e) {
+      setFlash({ ok: false, text: "Could not record decision: " + e.message });
+    }
+    setBusy(false);
   };
 
   const ai = detail && detail.ai_result;
@@ -219,11 +231,12 @@ function OfficerView({ taxonomy }) {
             <label>Reason / remarks</label>
             <input value=${reason} onInput=${(e) => setReason(e.target.value)} placeholder="e.g. Verified with JE; rerouted to sewerage wing." />
           </div>
-          <div style=${{ display: "flex", gap: 8, marginTop: 12 }}>
-            <button class="btn green sm" onClick=${() => decide("accept")}>✓ Accept AI & route</button>
-            <button class="btn amber sm" onClick=${() => decide("override")}>✎ Override & route</button>
-            <button class="btn ghost sm" onClick=${() => decide("escalate")}>↑ Escalate</button>
+          <div style=${{ display: "flex", gap: 8, marginTop: 12, alignItems: "center" }}>
+            <button class="btn green sm" disabled=${busy} onClick=${() => decide("accept")}>${busy ? html`<span class="spinner"></span>` : "✓ Accept AI & route"}</button>
+            <button class="btn amber sm" disabled=${busy} onClick=${() => decide("override")}>✎ Override & route</button>
+            <button class="btn ghost sm" disabled=${busy} onClick=${() => decide("escalate")}>↑ Escalate</button>
           </div>
+          ${flash && html`<div class="notice" style=${{ marginTop: 12, ...(flash.ok ? { background: "#e8f4ec", borderColor: "#bfe0ca", color: "#1a6b39" } : { background: "#fdecea", borderColor: "#f0c0c0", color: "#a03028" }) }}>${flash.text}</div>`}
         `}
       </div>
 

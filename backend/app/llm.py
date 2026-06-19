@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 
+from . import gemini
 from .schemas import Confidence, TriageAnalysis, UrgencyLevel
 from .taxonomy import (
     ALL_CATEGORIES,
@@ -94,6 +95,65 @@ class ClaudeProvider(LLMProvider):
             # Safety refusal or schema miss — degrade rather than crash.
             return RuleProvider().analyze(normalized_text, language_hint, notes)
         return _repair(resp.parsed_output)
+
+
+# ---------------------------------------------------------------------------
+# Gemini provider (Gemini 2.5 Flash Lite) — structured-output NLU
+# ---------------------------------------------------------------------------
+# Gemini structured-output schema (uppercase OpenAPI types). The category and
+# department enums constrain the model to the controlled vocabulary at decode
+# time, so routing is consistent by construction.
+_GEMINI_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "detected_language": {"type": "STRING", "enum": ["hi", "en", "mixed", "other"]},
+        "summary": {"type": "STRING"},
+        "category": {"type": "STRING", "enum": ALL_CATEGORIES},
+        "subcategory": {"type": "STRING"},
+        "department": {"type": "STRING", "enum": ALL_DEPARTMENTS},
+        "urgency": {"type": "STRING", "enum": ["Critical", "High", "Medium", "Low"]},
+        "is_safety_critical": {"type": "BOOLEAN"},
+        "sentiment": {"type": "STRING", "enum": ["angry", "distressed", "neutral", "appreciative"]},
+        "confidence": {
+            "type": "OBJECT",
+            "properties": {
+                "category": {"type": "NUMBER"},
+                "department": {"type": "NUMBER"},
+                "urgency": {"type": "NUMBER"},
+                "overall": {"type": "NUMBER"},
+            },
+            "required": ["category", "department", "urgency", "overall"],
+        },
+        "reason_codes": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "recommended_action": {"type": "STRING"},
+    },
+    "required": [
+        "detected_language", "summary", "category", "department", "urgency",
+        "is_safety_critical", "sentiment", "confidence", "reason_codes",
+    ],
+}
+
+
+class GeminiProvider(LLMProvider):
+    name = "gemini"
+
+    def __init__(self) -> None:
+        if not gemini.is_available():
+            raise RuntimeError("GEMINI_API_KEY not set")
+        self._model = gemini.gen_model()
+
+    def analyze(self, normalized_text: str, language_hint: str, notes: list[str]) -> TriageAnalysis:
+        user = (
+            f"Complaint (script hint: {language_hint}):\n\"\"\"\n{normalized_text}\n\"\"\"\n\n"
+            f"Preprocessing notes (already applied): {notes or 'none'}\n\n"
+            "Classify it per the rules and controlled vocabulary."
+        )
+        try:
+            raw = gemini.generate_json(SYSTEM_PROMPT, user, _GEMINI_SCHEMA)
+        except Exception:
+            # Network / API failure → degrade to offline rules rather than crash.
+            return RuleProvider().analyze(normalized_text, language_hint, notes)
+        return _repair(TriageAnalysis(**_coerce(raw)))
 
 
 # ---------------------------------------------------------------------------
@@ -236,13 +296,20 @@ def _repair(a: TriageAnalysis) -> TriageAnalysis:
 # ---------------------------------------------------------------------------
 def get_provider() -> LLMProvider:
     choice = os.getenv("LLM_PROVIDER", "auto").lower()
+    if choice == "gemini":
+        return GeminiProvider()
     if choice == "claude":
         return ClaudeProvider()
     if choice == "ollama":
         return OllamaProvider()
     if choice == "rules":
         return RuleProvider()
-    # auto: Claude if a key is present, else offline rules.
+    # auto: Gemini first (primary NLU engine), then Claude, else offline rules.
+    if gemini.is_available():
+        try:
+            return GeminiProvider()
+        except Exception:
+            pass
     if os.getenv("ANTHROPIC_API_KEY"):
         try:
             return ClaudeProvider()
