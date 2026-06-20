@@ -375,7 +375,7 @@ function SupervisorView() {
       <div class="stats">
         <div class=${"stat clickable" + (drill && drill.key === "all" ? " active" : "")} onClick=${() => drillBy("all", "All complaints", () => true)}>
           <div class="n">${stats.total_complaints}</div><div class="l">Total complaints ›</div></div>
-        <div class=${"stat alert clickable" + (drill && drill.key === "safety" ? " active" : "")} onClick=${() => drillBy("safety", "Safety-critical complaints", (r) => r.is_safety_critical || r.urgency === "Critical")}>
+        <div class=${"stat alert clickable" + (drill && drill.key === "safety" ? " active" : "")} onClick=${() => drillBy("safety", "Safety-critical complaints", (r) => r.is_safety_critical)}>
           <div class="n">${stats.safety_critical}</div><div class="l">Safety-critical flagged ›</div></div>
         <div class=${"stat clickable" + (drill && drill.key === "open" ? " active" : "")} onClick=${() => drillBy("open", "Open / in-progress complaints", (r) => ["Open", "In Progress"].includes(r.status))}>
           <div class="n">${stats.open + stats.in_progress}</div><div class="l">Open / in progress ›</div></div>
