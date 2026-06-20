@@ -139,12 +139,24 @@ function OfficerView({ taxonomy }) {
   const [override, setOverride] = useState({});
   const [flash, setFlash] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [filters, setFilters] = useState({ id: "", priority: "", status: "", dept: "" });
 
   const load = useCallback(async () => {
     const q = await api("/api/queue"); setItems(q.items);
     const a = await api("/api/audit"); setAudit(a.entries);
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  const setF = (k, v) => setFilters((f) => ({ ...f, [k]: v }));
+  const clearFilters = () => setFilters({ id: "", priority: "", status: "", dept: "" });
+  const statusOptions = ["Open", "In Progress", "Routed", "Resolved"];
+  const filtered = items.filter((r) =>
+    (!filters.id || (r.complaint_id || "").toLowerCase().includes(filters.id.toLowerCase())) &&
+    (!filters.priority || r.urgency === filters.priority) &&
+    (!filters.status || r.status === filters.status) &&
+    (!filters.dept || r.department === filters.dept)
+  );
+  const activeFilterCount = Object.values(filters).filter(Boolean).length;
 
   const openItem = async (cid) => {
     setSel(cid); setReason(""); setOverride({}); setFlash(null);
@@ -178,15 +190,32 @@ function OfficerView({ taxonomy }) {
     <div class="grid-2">
       <div class="card">
         <h2>Officer Review Queue</h2>
-        <p class="sub">${items.length} complaints · sorted by urgency. Criticals first.</p>
+        <p class="sub">${filtered.length} of ${items.length} complaints${activeFilterCount ? " · filtered" : " · sorted by urgency, criticals first"}.</p>
+        <div class="filter-bar">
+          <input class="f-search" placeholder="🔍 Search ID (e.g. JS-1010)" value=${filters.id} onInput=${(e) => setF("id", e.target.value)} />
+          <select value=${filters.priority} onChange=${(e) => setF("priority", e.target.value)}>
+            <option value="">All priorities</option>
+            ${["Critical", "High", "Medium", "Low"].map((p) => html`<option value=${p}>${p}</option>`)}
+          </select>
+          <select value=${filters.status} onChange=${(e) => setF("status", e.target.value)}>
+            <option value="">All statuses</option>
+            ${statusOptions.map((s) => html`<option value=${s}>${s}</option>`)}
+          </select>
+          <select value=${filters.dept} onChange=${(e) => setF("dept", e.target.value)}>
+            <option value="">All departments</option>
+            ${(taxonomy.department_names || []).map((d) => html`<option value=${d}>${shortDept(d)}</option>`)}
+          </select>
+          ${activeFilterCount > 0 && html`<button class="btn ghost sm" onClick=${clearFilters}>✕ Clear (${activeFilterCount})</button>`}
+        </div>
         <table>
           <thead><tr><th>ID</th><th>Summary</th><th>Dept</th><th>Priority</th><th>Status</th></tr></thead>
           <tbody>
-            ${items.map((r) => html`
-              <tr class=${"clickable" + (sel === r.complaint_id ? " selected" : "")} onClick=${() => openItem(r.complaint_id)}>
+            ${filtered.length === 0 && html`<tr><td colspan="5"><div class="empty">No complaints match these filters.</div></td></tr>`}
+            ${filtered.map((r) => html`
+              <tr key=${r.complaint_id} class=${"clickable" + (sel === r.complaint_id ? " selected" : "")} onClick=${() => openItem(r.complaint_id)}>
                 <td class="mono">${r.complaint_id}</td>
                 <td>${(r.summary || r.text || "").slice(0, 60)}</td>
-                <td class="muted">${(r.department || "").split(" / ")[0].split(" (")[0]}</td>
+                <td class="muted">${shortDept(r.department)}</td>
                 <td><${Badge} cls=${urgClass(r.urgency)}>${r.urgency}<//></td>
                 <td class="muted">${r.status}</td>
               </tr>`)}
@@ -265,99 +294,145 @@ function OfficerView({ taxonomy }) {
 }
 
 /* ---------- SUPERVISOR ANALYTICS ---------- */
-function BarChart({ data, max }) {
-  const m = max || Math.max(1, ...data.map((d) => d[1]));
+const shortDept = (s) => (s || "").split(" (")[0].split(" / ")[0];
+const rowSummary = (r) => r.summary || r.text || "";
+
+function BarChart({ items, max, onClick, activeKey }) {
+  const [grown, setGrown] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setGrown(true), 30); return () => clearTimeout(t); }, []);
+  const m = max || Math.max(1, ...items.map((d) => d.value));
   return html`<div class="bars">
-    ${data.map(([name, val]) => html`
-      <div class="bar-row">
-        <span class="name" title=${name}>${name}</span>
-        <span class="bar-track"><span class="bar-fill" style=${{ width: (val / m) * 100 + "%" }}></span></span>
-        <span class="val">${val}</span>
+    ${items.map((d) => html`
+      <div key=${d.key} class=${"bar-row" + (onClick ? " clickable" : "") + (activeKey === d.key ? " active" : "")}
+           onClick=${onClick ? (() => onClick(d)) : null}>
+        <span class="name" title=${d.name}>${d.name}</span>
+        <span class="bar-track"><span class=${"bar-fill" + (d.cls ? " " + d.cls : "")} style=${{ width: (grown ? (d.value / m) * 100 : 0) + "%" }}></span></span>
+        <span class="val">${d.value}</span>
       </div>`)}
   </div>`;
+}
+
+function DrillTable({ rows }) {
+  if (!rows || rows.length === 0) return html`<div class="empty">No matching complaints.</div>`;
+  return html`<table>
+    <thead><tr><th>ID</th><th>Summary</th><th>District</th><th>Dept</th><th>Priority</th><th>Status</th></tr></thead>
+    <tbody>${rows.map((r) => html`
+      <tr key=${r.complaint_id}>
+        <td class="mono">${r.complaint_id}</td>
+        <td>${rowSummary(r).slice(0, 80)}</td>
+        <td>${r.district}</td>
+        <td class="muted">${shortDept(r.department)}</td>
+        <td><${Badge} cls=${urgClass(r.urgency)}>${r.urgency}<//></td>
+        <td class="muted">${r.status}</td>
+      </tr>`)}
+    </tbody>
+  </table>`;
 }
 
 function SupervisorView() {
   const [stats, setStats] = useState(null);
   const [clusters, setClusters] = useState([]);
+  const [records, setRecords] = useState([]);
+  const [drill, setDrill] = useState(null); // {title, subtitle, key, rows}
   const [q, setQ] = useState("");
-  const [nlq, setNlq] = useState(null);
   const [loadingQ, setLoadingQ] = useState(false);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     api("/api/analytics").then(setStats);
     api("/api/clusters").then((c) => setClusters(c.clusters));
+    api("/api/queue").then((d) => setRecords(d.items));
   }, []);
+  useEffect(() => { reload(); }, [reload]);
+
+  const showDrill = (d) => {
+    setDrill(d);
+    setTimeout(() => { const el = document.getElementById("drill-anchor"); if (el) el.scrollIntoView({ behavior: "smooth", block: "center" }); }, 40);
+  };
+  const drillBy = (key, title, fn) => {
+    if (drill && drill.key === key) return setDrill(null); // toggle off
+    showDrill({ key, title, subtitle: "", rows: records.filter(fn) });
+  };
 
   const ask = async () => {
+    if (!q.trim()) return;
     setLoadingQ(true);
-    try { setNlq(await post("/api/nlq", { question: q })); } catch (e) { setNlq({ error: e.message }); }
+    try {
+      const res = await post("/api/nlq", { question: q });
+      showDrill({ key: "nlq:" + q, title: `Query · “${q}”`, subtitle: "Filters: " + res.applied_filters.join("  ·  "), rows: res.results });
+    } catch (e) { showDrill({ key: "err", title: "Query error", subtitle: e.message, rows: [] }); }
     setLoadingQ(false);
   };
   const NLQ_SAMPLES = ["show pending water complaints in Hisar", "urgent safety cases", "long pending pension complaints", "all complaints in Rohtak"];
 
   if (!stats) return html`<div class="container"><div class="empty"><span class="spinner"></span> Loading governance dashboard…</div></div>`;
+
+  const deptItems = stats.by_department.map(([k, v]) => ({ name: shortDept(k), value: v, key: k }));
+  const urgItems = stats.by_urgency.map(([u, v]) => ({ name: u, value: v, key: u, cls: urgClass(u) }));
+  const distItems = stats.by_district.slice(0, 8).map(([d, v]) => ({ name: d, value: v, key: d }));
+
   return html`
     <div>
       <div class="stats">
-        <div class="stat"><div class="n">${stats.total_complaints}</div><div class="l">Total complaints</div></div>
-        <div class="stat alert"><div class="n">${stats.safety_critical}</div><div class="l">Safety-critical flagged</div></div>
-        <div class="stat"><div class="n">${stats.open + stats.in_progress}</div><div class="l">Open / in progress</div></div>
+        <div class=${"stat clickable" + (drill && drill.key === "all" ? " active" : "")} onClick=${() => drillBy("all", "All complaints", () => true)}>
+          <div class="n">${stats.total_complaints}</div><div class="l">Total complaints ›</div></div>
+        <div class=${"stat alert clickable" + (drill && drill.key === "safety" ? " active" : "")} onClick=${() => drillBy("safety", "Safety-critical complaints", (r) => r.is_safety_critical || r.urgency === "Critical")}>
+          <div class="n">${stats.safety_critical}</div><div class="l">Safety-critical flagged ›</div></div>
+        <div class=${"stat clickable" + (drill && drill.key === "open" ? " active" : "")} onClick=${() => drillBy("open", "Open / in-progress complaints", (r) => ["Open", "In Progress"].includes(r.status))}>
+          <div class="n">${stats.open + stats.in_progress}</div><div class="l">Open / in progress ›</div></div>
         <div class="stat"><div class="n">${pct(stats.override_rate)}%</div><div class="l">AI override rate (${stats.ai_decisions_reviewed} reviewed)</div></div>
       </div>
 
+      <div id="drill-anchor"></div>
+      ${drill && html`
+        <div class="drill" style=${{ marginTop: 20 }}>
+          <div class="drill-head">
+            <div class="t">${drill.title}<span class="count">${drill.rows.length} complaint(s)</span>${drill.subtitle && html`<div class="muted" style=${{ fontSize: 12, fontWeight: 500, marginTop: 2 }}>${drill.subtitle}</div>`}</div>
+            <button class="drill-close" onClick=${() => setDrill(null)}>✕ Close</button>
+          </div>
+          <div class="drill-body"><${DrillTable} rows=${drill.rows} /></div>
+        </div>`}
+
       <div class="grid-2" style=${{ marginTop: 20 }}>
         <div class="card">
-          <h2>Complaints by Department</h2>
+          <h2>Complaints by Department <span class="hint">click a bar to drill in</span></h2>
           <p class="sub">Where the load is concentrated.</p>
-          <${BarChart} data=${stats.by_department.map(([k, v]) => [k.split(" (")[0].split(" / ")[0], v])} />
+          <${BarChart} items=${deptItems} activeKey=${drill && drill.key}
+            onClick=${(d) => drillBy(d.key, "Department · " + shortDept(d.key), (r) => r.department === d.key)} />
         </div>
         <div class="card">
-          <h2>Priority Mix</h2>
+          <h2>Priority Mix <span class="hint">click to filter</span></h2>
           <p class="sub">Distribution of urgency across all complaints.</p>
-          <${BarChart} data=${stats.by_urgency} />
-          <div class="section-title">Top districts</div>
-          <${BarChart} data=${stats.by_district.slice(0, 6)} />
+          <${BarChart} items=${urgItems} activeKey=${drill && drill.key}
+            onClick=${(d) => drillBy(d.key, "Priority · " + d.key, (r) => r.urgency === d.key)} />
+          <div class="section-title">Top districts <span class="hint">click to filter</span></div>
+          <${BarChart} items=${distItems} activeKey=${drill && drill.key}
+            onClick=${(d) => drillBy(d.key, "District · " + d.key, (r) => r.district === d.key)} />
         </div>
       </div>
 
       <div class="card" style=${{ marginTop: 20 }}>
-        <h2>Systemic Issue Detection (clustering)</h2>
+        <h2>Systemic Issue Detection (clustering) <span class="hint">click a cluster to see every complaint in it</span></h2>
         <p class="sub">Complaints automatically grouped by issue + locality, surfacing recurring failures and departmental bottlenecks before they escalate.</p>
         ${clusters.length === 0 && html`<div class="empty">No multi-complaint clusters detected yet.</div>`}
         ${clusters.map((c) => html`
-          <div class=${"cluster" + (c.is_systemic ? " systemic" : "")}>
+          <div key=${c.cluster_id} class=${"cluster clickable" + (c.is_systemic ? " systemic" : "") + (drill && drill.key === c.cluster_id ? " active" : "")}
+               onClick=${() => showDrill({ key: c.cluster_id, title: "Cluster · " + c.label, subtitle: c.districts.join(", ") + " — " + c.departments.map(shortDept).join(", "), rows: c.complaints })}>
             <div class="top">
               <div class="label">${c.label} <span class="pill">${c.size} complaints</span> ${c.is_systemic && html`<span class="pill" style=${{ background: "#fbe6c0", color: "#8a5a14" }}>⚠ systemic</span>`}</div>
-              <div class="muted" style=${{ fontSize: 12 }}>${c.districts.join(", ")} · ${c.departments.map((d) => d.split(" (")[0]).join(", ")}</div>
+              <div class="muted" style=${{ fontSize: 12 }}>${c.districts.join(", ")} · ${c.departments.map(shortDept).join(", ")} <span style=${{ color: "var(--blue)", fontWeight: 600 }}>· view ›</span></div>
             </div>
-            <ul>${c.samples.map((s) => html`<li>${s}</li>`)}</ul>
+            <ul>${c.samples.map((s, i) => html`<li key=${i}>${s}</li>`)}</ul>
           </div>`)}
       </div>
 
       <div class="card" style=${{ marginTop: 20 }}>
         <h2>Ask the Data (Natural-Language Query)</h2>
-        <p class="sub">Plain-language supervisory queries over the complaint base. The applied filters are shown — fully transparent, no black box.</p>
+        <p class="sub">Plain-language supervisory queries over the complaint base — results open in the panel above, with the applied filters shown (transparent, no black box).</p>
         <div class="row">
           <div><input value=${q} onInput=${(e) => setQ(e.target.value)} placeholder="e.g. show pending water complaints in Hisar" onKeyDown=${(e) => e.key === "Enter" && ask()} /></div>
-          <div style=${{ flex: "0 0 auto" }}><button class="btn" disabled=${loadingQ || !q.trim()} onClick=${ask}>${loadingQ ? html`<span class="spinner"></span>` : "Ask"}</button></div>
+          <div style=${{ flex: "0 0 auto" }}><button class="btn" disabled=${loadingQ || !q.trim()} onClick=${ask}>${loadingQ ? html`<span class="spinner"></span> Asking…` : "Ask"}</button></div>
         </div>
-        <div class="samples">${NLQ_SAMPLES.map((s) => html`<button class="sample-chip" onClick=${() => setQ(s)}>${s}</button>`)}</div>
-        ${nlq && nlq.error && html`<p class="notice" style=${{ marginTop: 12 }}>${nlq.error}</p>`}
-        ${nlq && !nlq.error && html`
-          <div class="notice" style=${{ marginTop: 12 }}>
-            <b>${nlq.count}</b> match(es). Filters applied: ${nlq.applied_filters.join("  ·  ")}
-          </div>
-          ${nlq.results.length > 0 && html`
-            <table style=${{ marginTop: 10 }}>
-              <thead><tr><th>ID</th><th>Summary</th><th>District</th><th>Dept</th><th>Priority</th><th>Status</th></tr></thead>
-              <tbody>${nlq.results.map((r) => html`
-                <tr><td class="mono">${r.complaint_id}</td><td>${r.summary}</td><td>${r.district}</td>
-                <td class="muted">${(r.department || "").split(" (")[0]}</td>
-                <td><${Badge} cls=${urgClass(r.urgency)}>${r.urgency}<//></td><td class="muted">${r.status}</td></tr>`)}
-              </tbody>
-            </table>`}
-        `}
+        <div class="samples">${NLQ_SAMPLES.map((s) => html`<button class="sample-chip" onClick=${() => { setQ(s); }}>${s}</button>`)}</div>
       </div>
     </div>`;
 }
