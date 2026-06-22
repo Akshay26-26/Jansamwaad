@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 # Load backend/.env regardless of the process working directory.
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+from . import database as _db  # noqa: E402
 from .llm import get_provider  # noqa: E402
 from .schemas import (  # noqa: E402
     AuditEntry,
@@ -42,6 +43,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def on_startup():
+    if not store._use_db:
+        connected = _db.init_db()
+        if connected:
+            store._use_db = True
+            store._load_from_db()
 
 
 @app.middleware("http")

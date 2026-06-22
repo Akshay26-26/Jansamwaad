@@ -14,7 +14,6 @@ from typing import Generator
 from sqlalchemy import Boolean, Column, Integer, JSON, String, Text, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
-DATABASE_URL = os.getenv("DATABASE_URL")
 
 Base = declarative_base()
 
@@ -60,10 +59,13 @@ _SessionLocal = None
 def init_db() -> bool:
     """Connect to DB, create tables if needed. Returns True if DB is available."""
     global _engine, _SessionLocal
-    if not DATABASE_URL:
+    if _engine is not None:
+        return True
+    url = os.getenv("DATABASE_URL")
+    if not url:
         return False
     try:
-        _engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+        _engine = create_engine(url, pool_pre_ping=True)
         _SessionLocal = sessionmaker(bind=_engine)
         Base.metadata.create_all(_engine)
         return True
