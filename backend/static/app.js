@@ -467,7 +467,7 @@ function App() {
           ${health && html`
             <div class=${"provider-badge" + (health.sovereign_mode ? " sovereign" : "")}>
               <span class="dot"></span>
-              ${health.sovereign_mode ? "On-prem (" + health.provider + ")" : "AI engine: " + health.provider}
+              ${health.sovereign_mode ? "On-prem" : "AI Engine"}
             </div>`}
         </div>
         <nav class="tabs">
