@@ -1,30 +1,94 @@
-"""SQLAlchemy engine and session factory.
+"""SQLAlchemy persistence layer.
 
-DATABASE_URL defaults to SQLite (zero-config local dev). Set it to a
-PostgreSQL connection string for AWS RDS staging / production.
+Two tables: complaints (one row per grievance) and audit_entries (officer
+decisions). Used by Store when DATABASE_URL env-var is set; otherwise the app
+runs fully in-memory (offline / local-dev mode).
 """
 
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from typing import Generator
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Boolean, Column, Integer, JSON, String, Text, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./complaints.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# AWS RDS / older Heroku-style URLs use postgres:// — SQLAlchemy needs postgresql://
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-_is_sqlite = DATABASE_URL.startswith("sqlite")
-
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    connect_args={"check_same_thread": False} if _is_sqlite else {},
-    **({} if _is_sqlite else {"pool_size": 5, "max_overflow": 10}),
-)
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+class ComplaintRow(Base):
+    __tablename__ = "complaints"
+
+    complaint_id = Column(String, primary_key=True)
+    text = Column(Text, nullable=False, default="")
+    district = Column(String, default="")
+    category = Column(String, default="")
+    department = Column(String, default="")
+    urgency = Column(String, default="Medium")
+    status = Column(String, default="Open")
+    summary = Column(Text, default="")
+    created_at = Column(String, default="")
+    source = Column(String, default="live")
+    is_safety_critical = Column(Boolean, default=False)
+    triage_json = Column(JSON, nullable=True)
+
+
+class AuditRow(Base):
+    __tablename__ = "audit_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    complaint_id = Column(String, index=True)
+    officer_id = Column(String, default="")
+    action = Column(String, default="")
+    ai_category = Column(String, default="")
+    final_category = Column(String, default="")
+    ai_department = Column(String, default="")
+    final_department = Column(String, default="")
+    ai_urgency = Column(String, default="")
+    final_urgency = Column(String, default="")
+    reason = Column(Text, default="")
+    timestamp = Column(String, default="")
+
+
+_engine = None
+_SessionLocal = None
+
+
+def init_db() -> bool:
+    """Connect to DB, create tables if needed. Returns True if DB is available."""
+    global _engine, _SessionLocal
+    if not DATABASE_URL:
+        return False
+    try:
+        _engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+        _SessionLocal = sessionmaker(bind=_engine)
+        Base.metadata.create_all(_engine)
+        return True
+    except Exception as exc:
+        print(f"[db] Connection failed ({exc}). Running in-memory only.")
+        _engine = None
+        _SessionLocal = None
+        return False
+
+
+def is_available() -> bool:
+    return _engine is not None
+
+
+@contextmanager
+def session() -> Generator[Session | None, None, None]:
+    if _SessionLocal is None:
+        yield None
+        return
+    db: Session = _SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()

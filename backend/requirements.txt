@@ -5,9 +5,6 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.7
 python-dotenv>=1.0
-
-# Database — PostgreSQL for AWS RDS; SQLAlchemy falls back to SQLite when
-# DATABASE_URL is not set (zero-config local dev).
 sqlalchemy>=2.0
 psycopg2-binary>=2.9
 

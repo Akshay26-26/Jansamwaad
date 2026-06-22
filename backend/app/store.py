@@ -1,276 +1,200 @@
-"""PostgreSQL (or SQLite) backed data store.
+"""Data store with optional PostgreSQL persistence.
 
-API surface identical to the original in-memory store — no API routes change.
+In-memory dicts + TF-IDF/embedding index remain the primary read path (fast,
+supports semantic search). PostgreSQL (when DATABASE_URL is set) is the
+persistence layer: every write is mirrored to the DB and the full state is
+reloaded from DB on startup.
 
-Startup sequence:
-  1. CREATE TABLE IF NOT EXISTS for all three tables.
-  2. Seed DB with historical records if the complaints table is empty.
-  3. Rebuild the in-memory embedding index from all DB records.
-
-The embedding index stays in-memory (rebuilt on each restart) because
-storing float vectors in a plain SQL column is wasteful for a prototype;
-production would use pgvector.
+Falls back to pure in-memory mode if DATABASE_URL is not set.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from . import embeddings, gemini, similarity
-from .database import SessionLocal, engine
-from .models import AuditLog, Base, Complaint, TriageResultDB
-from .schemas import AuditEntry, SimilarCase, TriageAnalysis, TriageResult
+from . import database, embeddings, gemini, similarity
+from .database import AuditRow, ComplaintRow
+from .schemas import AuditEntry, TriageResult
 from .seed_data import seed_records
-from .taxonomy import DISTRICTS
+from .taxonomy import ALL_DEPARTMENTS, DISTRICTS
 
-
-# ---------------------------------------------------------------------------
-# Session helpers
-# ---------------------------------------------------------------------------
-
-@contextmanager
-def _db():
-    """Write session: commits on clean exit, rolls back on exception."""
-    sess = SessionLocal()
-    try:
-        yield sess
-        sess.commit()
-    except Exception:
-        sess.rollback()
-        raise
-    finally:
-        sess.close()
-
-
-def _read(query_fn):
-    """One-shot read: opens a session, calls query_fn(db), closes cleanly."""
-    sess = SessionLocal()
-    try:
-        return query_fn(sess)
-    finally:
-        sess.close()
-
-
-# ---------------------------------------------------------------------------
-# Row → dict / schema converters
-# ---------------------------------------------------------------------------
-
-def _comp_to_dict(row: Complaint) -> dict:
-    return {
-        "complaint_id": row.complaint_id,
-        "text": row.text,
-        "district": row.district,
-        "category": row.category,
-        "department": row.department,
-        "urgency": row.urgency,
-        "status": row.status,
-        "summary": row.summary,
-        "created_at": row.created_at,
-        "source": row.source,
-        "is_safety_critical": bool(row.is_safety_critical),
-    }
-
-
-def _row_to_triage_result(row: TriageResultDB) -> TriageResult:
-    analysis = TriageAnalysis(**row.analysis_json)
-    similar = [SimilarCase(**s) for s in (row.similar_cases_json or [])]
-    return TriageResult(
-        complaint_id=row.complaint_id,
-        original_text=row.original_text or "",
-        normalized_text=row.normalized_text or "",
-        district=row.district or "",
-        analysis=analysis,
-        routing_office=row.routing_office or "",
-        suggested_sla_days=row.suggested_sla_days or 7,
-        sla_due=row.sla_due or "",
-        similar_cases=similar,
-        is_potential_duplicate=bool(row.is_potential_duplicate),
-        provider=row.provider or "",
-        created_at=row.created_at or "",
-    )
-
-
-def _row_to_audit_entry(row: AuditLog) -> AuditEntry:
-    return AuditEntry(
-        complaint_id=row.complaint_id,
-        officer_id=row.officer_id,
-        action=row.action,
-        ai_category=row.ai_category,
-        final_category=row.final_category,
-        ai_department=row.ai_department,
-        final_department=row.final_department,
-        ai_urgency=row.ai_urgency,
-        final_urgency=row.final_urgency,
-        reason=row.reason or "",
-        timestamp=row.timestamp,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatible dict-like proxy
-# Used by triage.py (RAG lookup) and main.py (complaint / decision endpoints).
-# ---------------------------------------------------------------------------
-
-class _RecordsProxy:
-    def get(self, cid: str) -> dict | None:
-        def _q(db):
-            row = db.query(Complaint).filter(Complaint.complaint_id == cid).first()
-            return _comp_to_dict(row) if row else None
-        return _read(_q)
-
-
-# ---------------------------------------------------------------------------
-# Store
-# ---------------------------------------------------------------------------
 
 class Store:
     def __init__(self) -> None:
-        Base.metadata.create_all(bind=engine)
+        self.records: dict[str, dict] = {}
+        self.results: dict[str, TriageResult] = {}
+        self.audit: list[AuditEntry] = []
         self.index = embeddings.make_index()
         self._counter = 2000
-        self._proxy = _RecordsProxy()
-        self._load_seed()
-        self._rebuild_index()
+        self._use_db = database.init_db()
+        if self._use_db:
+            self._load_from_db()
+        else:
+            self._load_seed()
 
-    # -- properties that match the old dict-based interface -----------------
+    def _index_text(self, rec: dict) -> str:
+        return rec.get("text", "")
 
-    @property
-    def records(self) -> _RecordsProxy:
-        return self._proxy
+    # ------------------------------------------------------------------
+    # Startup loaders
+    # ------------------------------------------------------------------
 
-    @property
-    def audit(self) -> list[AuditEntry]:
-        def _q(db):
-            rows = db.query(AuditLog).order_by(AuditLog.id).all()
-            return [_row_to_audit_entry(r) for r in rows]
-        return _read(_q)
+    def _load_from_db(self) -> None:
+        with database.session() as db:
+            if db.query(ComplaintRow).count() == 0:
+                for rec in seed_records():
+                    db.add(ComplaintRow(
+                        complaint_id=rec["complaint_id"],
+                        text=rec["text"],
+                        district=rec["district"],
+                        category=rec["category"],
+                        department=rec["department"],
+                        urgency=rec["urgency"],
+                        status=rec["status"],
+                        summary=rec["summary"],
+                        created_at=rec["created_at"],
+                        source=rec["source"],
+                        is_safety_critical=False,
+                        triage_json=None,
+                    ))
 
-    # -- startup ------------------------------------------------------------
+            for row in db.query(ComplaintRow).all():
+                rec = {
+                    "complaint_id": row.complaint_id,
+                    "text": row.text,
+                    "district": row.district,
+                    "category": row.category,
+                    "department": row.department,
+                    "urgency": row.urgency,
+                    "status": row.status,
+                    "summary": row.summary,
+                    "created_at": row.created_at,
+                    "source": row.source,
+                    "is_safety_critical": row.is_safety_critical,
+                }
+                self.records[row.complaint_id] = rec
+                if row.triage_json:
+                    try:
+                        self.results[row.complaint_id] = TriageResult(**row.triage_json)
+                    except Exception:
+                        pass
+
+            for ar in db.query(AuditRow).all():
+                self.audit.append(AuditEntry(
+                    complaint_id=ar.complaint_id,
+                    officer_id=ar.officer_id,
+                    action=ar.action,
+                    ai_category=ar.ai_category,
+                    final_category=ar.final_category,
+                    ai_department=ar.ai_department,
+                    final_department=ar.final_department,
+                    ai_urgency=ar.ai_urgency,
+                    final_urgency=ar.final_urgency,
+                    reason=ar.reason,
+                    timestamp=ar.timestamp,
+                ))
+
+        self.index.add_many([(cid, self._index_text(rec)) for cid, rec in self.records.items()])
+
+        numeric_ids = [int(cid[3:]) for cid in self.records if cid.startswith("JS-") and cid[3:].isdigit()]
+        if numeric_ids:
+            self._counter = max(numeric_ids)
 
     def _load_seed(self) -> None:
-        """Insert seed records on first run; update ID counter otherwise."""
-        count = _read(lambda db: db.query(Complaint).count())
-        if count > 0:
-            self._sync_counter()
-            return
-        with _db() as db:
-            for rec in seed_records():
-                db.add(Complaint(**rec))
+        records = seed_records()
+        for rec in records:
+            self.records[rec["complaint_id"]] = rec
+        self.index.add_many([(r["complaint_id"], self._index_text(r)) for r in records])
 
-    def _sync_counter(self) -> None:
-        ids = _read(lambda db: [r[0] for r in db.query(Complaint.complaint_id).all()])
-        nums = [
-            int(cid.split("-")[1])
-            for cid in ids
-            if cid.startswith("JS-") and cid.split("-")[1].isdigit()
-        ]
-        if nums:
-            self._counter = max(nums)
-
-    def _rebuild_index(self) -> None:
-        pairs = _read(lambda db: [(r.complaint_id, r.text or "") for r in db.query(Complaint).all()])
-        self.index.add_many(pairs)
-        nums = [
-            int(cid.split("-")[1])
-            for cid, _ in pairs
-            if cid.startswith("JS-") and cid.split("-")[1].isdigit()
-        ]
-        if nums:
-            self._counter = max(self._counter, max(nums))
-
-    # -- IDs ----------------------------------------------------------------
-
+    # -- ids ---------------------------------------------------------------
     def next_id(self) -> str:
         self._counter += 1
         return f"JS-{self._counter}"
 
-    # -- writes -------------------------------------------------------------
-
+    # -- writes ------------------------------------------------------------
     def add_result(self, result: TriageResult) -> None:
-        comp = Complaint(
-            complaint_id=result.complaint_id,
-            text=result.original_text,
-            district=result.district,
-            category=result.analysis.category,
-            department=result.analysis.department,
-            urgency=result.analysis.urgency.value,
-            status="Open",
-            summary=result.analysis.summary,
-            created_at=result.created_at,
-            source="live",
-            is_safety_critical=result.analysis.is_safety_critical,
-        )
-        triage_db = TriageResultDB(
-            complaint_id=result.complaint_id,
-            original_text=result.original_text,
-            normalized_text=result.normalized_text,
-            district=result.district,
-            analysis_json=result.analysis.model_dump(),
-            routing_office=result.routing_office,
-            suggested_sla_days=result.suggested_sla_days,
-            sla_due=result.sla_due,
-            similar_cases_json=[s.model_dump() for s in result.similar_cases],
-            is_potential_duplicate=result.is_potential_duplicate,
-            provider=result.provider,
-            created_at=result.created_at,
-        )
-        with _db() as db:
-            db.merge(comp)
-            db.merge(triage_db)
-        self.index.add(result.complaint_id, result.original_text)
+        self.results[result.complaint_id] = result
+        rec = {
+            "complaint_id": result.complaint_id,
+            "text": result.original_text,
+            "district": result.district,
+            "category": result.analysis.category,
+            "department": result.analysis.department,
+            "urgency": result.analysis.urgency.value,
+            "status": "Open",
+            "summary": result.analysis.summary,
+            "created_at": result.created_at,
+            "source": "live",
+            "is_safety_critical": result.analysis.is_safety_critical,
+        }
+        self.records[result.complaint_id] = rec
+        self.index.add(result.complaint_id, self._index_text(rec))
+
+        if self._use_db:
+            with database.session() as db:
+                db.merge(ComplaintRow(
+                    complaint_id=rec["complaint_id"],
+                    text=rec["text"],
+                    district=rec["district"],
+                    category=rec["category"],
+                    department=rec["department"],
+                    urgency=rec["urgency"],
+                    status=rec["status"],
+                    summary=rec["summary"],
+                    created_at=rec["created_at"],
+                    source=rec["source"],
+                    is_safety_critical=rec["is_safety_critical"],
+                    triage_json=result.model_dump(),
+                ))
 
     def log_decision(self, entry: AuditEntry) -> None:
-        with _db() as db:
-            db.add(AuditLog(
-                complaint_id=entry.complaint_id,
-                officer_id=entry.officer_id,
-                action=entry.action,
-                ai_category=entry.ai_category,
-                final_category=entry.final_category,
-                ai_department=entry.ai_department,
-                final_department=entry.final_department,
-                ai_urgency=entry.ai_urgency,
-                final_urgency=entry.final_urgency,
-                reason=entry.reason,
-                timestamp=entry.timestamp,
-            ))
-            comp = db.query(Complaint).filter(Complaint.complaint_id == entry.complaint_id).first()
-            if comp:
-                if entry.action in ("accept", "override"):
-                    comp.status = "Routed"
-                comp.category = entry.final_category
-                comp.department = entry.final_department
-                comp.urgency = entry.final_urgency
+        self.audit.append(entry)
+        rec = self.records.get(entry.complaint_id)
+        if rec:
+            rec["status"] = "Routed" if entry.action in ("accept", "override") else rec.get("status", "Open")
+            rec["category"] = entry.final_category
+            rec["department"] = entry.final_department
+            rec["urgency"] = entry.final_urgency
 
-    # -- reads --------------------------------------------------------------
+        if self._use_db:
+            with database.session() as db:
+                db.add(AuditRow(
+                    complaint_id=entry.complaint_id,
+                    officer_id=entry.officer_id,
+                    action=entry.action,
+                    ai_category=entry.ai_category,
+                    final_category=entry.final_category,
+                    ai_department=entry.ai_department,
+                    final_department=entry.final_department,
+                    ai_urgency=entry.ai_urgency,
+                    final_urgency=entry.final_urgency,
+                    reason=entry.reason,
+                    timestamp=entry.timestamp,
+                ))
+                if rec:
+                    db.query(ComplaintRow).filter(
+                        ComplaintRow.complaint_id == entry.complaint_id
+                    ).update({
+                        "status": rec["status"],
+                        "category": rec["category"],
+                        "department": rec["department"],
+                        "urgency": rec["urgency"],
+                    })
 
+    # -- reads -------------------------------------------------------------
     def queue(self, limit: int = 100) -> list[dict]:
-        def _q(db):
-            rows = db.query(Complaint).order_by(Complaint.created_at.desc()).limit(limit * 2).all()
-            return [_comp_to_dict(r) for r in rows]
-        rows = _read(_q)
+        rows = sorted(self.records.values(), key=lambda r: r.get("created_at", ""), reverse=True)
         urg_rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-        rows.sort(key=lambda r: urg_rank.get(r.get("urgency", "Medium"), 2))
+        rows.sort(key=lambda r: (urg_rank.get(r.get("urgency", "Medium"), 2)))
         return rows[:limit]
 
     def get_result(self, cid: str) -> TriageResult | None:
-        def _q(db):
-            row = db.query(TriageResultDB).filter(TriageResultDB.complaint_id == cid).first()
-            return _row_to_triage_result(row) if row else None
-        return _read(_q)
+        return self.results.get(cid)
 
-    # -- analytics ----------------------------------------------------------
-
+    # -- analytics ---------------------------------------------------------
     def analytics(self) -> dict:
-        def _q(db):
-            recs = [_comp_to_dict(r) for r in db.query(Complaint).all()]
-            overrides = db.query(AuditLog).filter(AuditLog.action == "override").count()
-            decisions = db.query(AuditLog).count()
-            return recs, overrides, decisions
-
-        recs, overrides, decisions = _read(_q)
+        recs = list(self.records.values())
         total = len(recs)
         by_dept = Counter(r.get("department", "Unknown") for r in recs)
         by_district = Counter(r.get("district", "Unknown") for r in recs)
@@ -278,6 +202,8 @@ class Store:
         by_status = Counter(r.get("status", "Open") for r in recs)
         by_category = Counter(r.get("category", "Unknown") for r in recs)
         safety = sum(1 for r in recs if r.get("is_safety_critical"))
+        overrides = sum(1 for a in self.audit if a.action == "override")
+        decisions = len(self.audit)
         return {
             "total_complaints": total,
             "safety_critical": safety,
@@ -294,12 +220,16 @@ class Store:
         }
 
     def clusters(self) -> list[dict]:
-        recs = _read(lambda db: [_comp_to_dict(r) for r in db.query(Complaint).all()])
-        return similarity.cluster(recs, self.index)
+        return similarity.cluster(list(self.records.values()), self.index)
 
-    # -- NLQ ----------------------------------------------------------------
-
+    # -- Natural-language query (supervisory) ------------------------------
     def nlq(self, question: str) -> dict:
+        """Transparent NLQ. Gemini parses the question into STRUCTURED filters
+        (robust to phrasing/language); the filters are then applied
+        deterministically over the store and returned to the supervisor — so
+        the query is powered by Gemini but stays fully auditable (no black box).
+        Falls back to keyword parsing if Gemini is unavailable.
+        """
         if gemini.is_available():
             try:
                 recs, filters = self._gemini_filters(question)
@@ -307,9 +237,6 @@ class Store:
             except Exception:
                 pass
         return self._keyword_nlq(question)
-
-    def _all_records(self) -> list[dict]:
-        return _read(lambda db: [_comp_to_dict(r) for r in db.query(Complaint).all()])
 
     def _gemini_filters(self, question: str) -> tuple[list[dict], list[str]]:
         schema = {
@@ -334,7 +261,7 @@ class Store:
             "questions (e.g. 7)."
         )
         f = gemini.generate_json(system, question, schema)
-        recs = self._all_records()
+        recs = list(self.records.values())
         filters: list[str] = []
 
         dist = (f.get("district") or "").strip()
@@ -401,8 +328,9 @@ class Store:
         }
 
     def _keyword_nlq(self, question: str) -> dict:
+        """Offline keyword fallback when Gemini is unavailable."""
         q = question.lower()
-        recs = self._all_records()
+        recs = list(self.records.values())
         filters: list[str] = []
 
         for d in DISTRICTS:
