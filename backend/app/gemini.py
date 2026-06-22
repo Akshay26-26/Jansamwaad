@@ -13,6 +13,7 @@ offline engines if Gemini is unreachable rather than failing.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 
