@@ -141,6 +141,24 @@ def audit() -> dict:
     return {"entries": [a.model_dump() for a in reversed(store.audit)]}
 
 
+@app.delete("/api/admin/purge-live-records")
+def purge_live_records() -> dict:
+    from . import database
+    from sqlalchemy import text
+    if not database.is_available():
+        return {"ok": False, "reason": "no database"}
+    with database.session() as db:
+        r = db.execute(text("DELETE FROM complaints WHERE source = 'live'"))
+        deleted = r.rowcount
+    live_ids = [cid for cid, rec in store.records.items() if rec.get("source") == "live"]
+    for cid in live_ids:
+        store.records.pop(cid, None)
+        store.results.pop(cid, None)
+    store.audit.clear()
+    store._counter = 2000
+    return {"ok": True, "deleted": deleted}
+
+
 # --------------------------------------------------------------------------
 # Supervisory intelligence: analytics, clusters, NLQ
 # --------------------------------------------------------------------------

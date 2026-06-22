@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from .taxonomy import SAFETY_CRITICAL_SIGNALS
+
 
 def _d(days_ago: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
@@ -76,6 +78,11 @@ _RAW = [
 ]
 
 
+def _is_safety_critical(text: str) -> bool:
+    low = text.lower()
+    return any(sig.lower() in low for sig in SAFETY_CRITICAL_SIGNALS)
+
+
 def seed_records() -> list[dict]:
     out = []
     for cid, text, dist, cat, dept, urg, status, summary, days in _RAW:
@@ -90,5 +97,6 @@ def seed_records() -> list[dict]:
             "summary": summary,
             "created_at": _d(days),
             "source": "historical_seed",
+            "is_safety_critical": _is_safety_critical(text),
         })
     return out
