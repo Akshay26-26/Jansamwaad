@@ -153,24 +153,20 @@ def audit() -> dict:
 
 @app.delete("/api/admin/purge-live-records")
 def purge_live_records() -> dict:
-    import os
     from . import database
     from sqlalchemy import text
-    db_url_set = bool(os.getenv("DATABASE_URL"))
-    if not database.is_available():
-        database.init_db()
-    if not database.is_available():
-        return {"ok": False, "reason": "no database", "DATABASE_URL_set": db_url_set, "store_use_db": store._use_db}
-    with database.session() as db:
-        r = db.execute(text("DELETE FROM complaints WHERE source = 'live'"))
-        deleted = r.rowcount
     live_ids = [cid for cid, rec in store.records.items() if rec.get("source") == "live"]
     for cid in live_ids:
         store.records.pop(cid, None)
         store.results.pop(cid, None)
     store.audit.clear()
     store._counter = 2000
-    return {"ok": True, "deleted": deleted, "cleared_from_memory": len(live_ids)}
+    db_deleted = 0
+    if database.is_available():
+        with database.session() as db:
+            r = db.execute(text("DELETE FROM complaints WHERE source = 'live'"))
+            db_deleted = r.rowcount
+    return {"ok": True, "cleared_from_memory": len(live_ids), "deleted_from_db": db_deleted}
 
 
 # --------------------------------------------------------------------------
