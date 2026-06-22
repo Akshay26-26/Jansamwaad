@@ -7,3 +7,8 @@ venv/
 .claude/settings.local.json
 *.log
 *.db
+
+# Elastic Beanstalk Files
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml
