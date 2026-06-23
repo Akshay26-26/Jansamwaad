@@ -53,10 +53,6 @@ function IntakeView({ districts, onPersisted }) {
 
   const a = result && result.analysis;
   return html`
-    <div class="intake-hero">
-      <h2 class="intake-punchline">Right Complaint. Right Department. Right Time.</h2>
-      <p class="intake-punchline-sub">Tell us your problem — we'll make sure it reaches the right hands, fast.</p>
-    </div>
     <div class="grid-2">
       <div class="card">
         <h2>Citizen Complaint Intake</h2>
