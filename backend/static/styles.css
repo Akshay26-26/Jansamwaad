@@ -42,7 +42,6 @@ body {
   border: 2px solid var(--saffron);
 }
 .app-title h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; }
-.app-title h1 .header-tagline { display: block; font-size: 11px; font-weight: 600; letter-spacing: .7px; color: var(--saffron); text-transform: uppercase; opacity: 1; margin-top: 2px; }
 .app-title p { font-size: 12px; margin: 0; opacity: .82; }
 .header-spacer { flex: 1; }
 .provider-badge {
