@@ -464,7 +464,7 @@ function App() {
         <div class="bar">
           <div class="emblem">हरि</div>
           <div class="app-title">
-            <h1>Jansamvaad 2.0+ · AI Grievance Intelligence</h1>
+            <h1>Jansamvaad 2.0+ · AI Grievance Intelligence<br/><span class="header-tagline">Right Complaint. Right Department. Right Time.</span></h1>
             <p>Advisory decision-support for the Haryana CM Window — Government of Haryana</p>
           </div>
           <div class="header-spacer"></div>
