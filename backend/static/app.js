@@ -53,6 +53,10 @@ function IntakeView({ districts, onPersisted }) {
 
   const a = result && result.analysis;
   return html`
+    <div class="intake-hero">
+      <h2 class="intake-punchline">Right Complaint. Right Department. Right Time.</h2>
+      <p class="intake-punchline-sub">Tell us your problem — we'll make sure it reaches the right hands, fast.</p>
+    </div>
     <div class="grid-2">
       <div class="card">
         <h2>Citizen Complaint Intake</h2>
@@ -460,7 +464,7 @@ function App() {
         <div class="bar">
           <div class="emblem">हरि</div>
           <div class="app-title">
-            <h1>Jansamvaad 2.0+ · AI Grievance Intelligence · Right Complaint. Right Department. Right Time.</h1>
+            <h1>Jansamvaad 2.0+ · AI Grievance Intelligence</h1>
             <p>Advisory decision-support for the Haryana CM Window — Government of Haryana</p>
           </div>
           <div class="header-spacer"></div>
