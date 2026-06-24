@@ -139,7 +139,7 @@ function OfficerView({ taxonomy }) {
   const [override, setOverride] = useState({});
   const [flash, setFlash] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [filters, setFilters] = useState({ id: "", priority: "", status: "", dept: "" });
+  const [filters, setFilters] = useState({ id: "", priority: "", status: "", dept: "", district: "" });
 
   const load = useCallback(async () => {
     const q = await api("/api/queue"); setItems(q.items);
@@ -148,13 +148,14 @@ function OfficerView({ taxonomy }) {
   useEffect(() => { load(); }, [load]);
 
   const setF = (k, v) => setFilters((f) => ({ ...f, [k]: v }));
-  const clearFilters = () => setFilters({ id: "", priority: "", status: "", dept: "" });
+  const clearFilters = () => setFilters({ id: "", priority: "", status: "", dept: "", district: "" });
   const statusOptions = ["Open", "In Progress", "Routed", "Resolved"];
   const filtered = items.filter((r) =>
     (!filters.id || (r.complaint_id || "").toLowerCase().includes(filters.id.toLowerCase())) &&
     (!filters.priority || r.urgency === filters.priority) &&
     (!filters.status || r.status === filters.status) &&
-    (!filters.dept || r.department === filters.dept)
+    (!filters.dept || r.department === filters.dept) &&
+    (!filters.district || r.district === filters.district)
   );
   const activeFilterCount = Object.values(filters).filter(Boolean).length;
 
@@ -204,6 +205,10 @@ function OfficerView({ taxonomy }) {
           <select value=${filters.dept} onChange=${(e) => setF("dept", e.target.value)}>
             <option value="">All departments</option>
             ${(taxonomy.department_names || []).map((d) => html`<option value=${d}>${shortDept(d)}</option>`)}
+          </select>
+          <select value=${filters.district} onChange=${(e) => setF("district", e.target.value)}>
+            <option value="">All districts</option>
+            ${(taxonomy.districts || []).map((d) => html`<option value=${d}>${d}</option>`)}
           </select>
           ${activeFilterCount > 0 && html`<button class="btn ghost sm" onClick=${clearFilters}>✕ Clear (${activeFilterCount})</button>`}
         </div>
