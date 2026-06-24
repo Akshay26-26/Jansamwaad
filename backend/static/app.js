@@ -208,14 +208,15 @@ function OfficerView({ taxonomy }) {
           ${activeFilterCount > 0 && html`<button class="btn ghost sm" onClick=${clearFilters}>✕ Clear (${activeFilterCount})</button>`}
         </div>
         <table>
-          <thead><tr><th>ID</th><th>Summary</th><th>Dept</th><th>Priority</th><th>Status</th></tr></thead>
+          <thead><tr><th>ID</th><th>Summary</th><th>Dept</th><th>District</th><th>Priority</th><th>Status</th></tr></thead>
           <tbody>
-            ${filtered.length === 0 && html`<tr><td colspan="5"><div class="empty">No complaints match these filters.</div></td></tr>`}
+            ${filtered.length === 0 && html`<tr><td colspan="6"><div class="empty">No complaints match these filters.</div></td></tr>`}
             ${filtered.map((r) => html`
               <tr key=${r.complaint_id} class=${"clickable" + (sel === r.complaint_id ? " selected" : "")} onClick=${() => openItem(r.complaint_id)}>
                 <td class="mono">${r.complaint_id}</td>
                 <td>${(r.summary || r.text || "").slice(0, 60)}</td>
                 <td class="muted">${shortDept(r.department)}</td>
+                <td class="muted">${r.district || "—"}</td>
                 <td><${Badge} cls=${urgClass(r.urgency)}>${r.urgency}<//></td>
                 <td class="muted">${r.status}</td>
               </tr>`)}
